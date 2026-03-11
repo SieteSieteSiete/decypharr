@@ -41,11 +41,11 @@ func NewDownloadManager(manager *Manager) *Downloader {
 		strmURL = fmt.Sprintf("http://%s:%s", bindAddress, cfg.Port)
 	}
 	return &Downloader{
-		manager:     manager,
-		strmURL:     strmURL,
-		mountPath:   cfg.Mount.MountPath,
-		logger:      manager.logger.With().Str("component", "downloader").Logger(),
-		dest:        cfg.DownloadFolder,
+		manager:      manager,
+		strmURL:      strmURL,
+		mountPath:    cfg.Mount.MountPath,
+		logger:       manager.logger.With().Str("component", "downloader").Logger(),
+		dest:         cfg.DownloadFolder,
 		maxDownloads: cfg.MaxDownloads,
 	}
 }
@@ -112,6 +112,10 @@ func (d *Downloader) markAsCompleted(entry *storage.Entry) {
 	go func() {
 		a := d.manager.arr.GetOrCreate(entry.Category)
 		a.Refresh()
+
+		if d.manager.mountManager != nil {
+			_ = d.manager.RefreshMount()
+		}
 	}()
 }
 

@@ -373,7 +373,7 @@ func (d *Downloader) processUsenetDownload(entry *storage.Entry) error {
 
 // processStrm creates symlinks for torrent files
 func (d *Downloader) processStrm(torrent *storage.Entry) error {
-	files := torrent.GetActiveFilesFiltered()
+	files := torrent.GetActiveFilesFiltered(d.logger)
 	d.logger.Info().Msgf("Creating .strm for %d files ...", len(files))
 
 	torrentSymlinkPath := torrent.DownloadPath()

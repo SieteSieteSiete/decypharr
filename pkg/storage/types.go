@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
@@ -17,7 +16,9 @@ import (
 
 var (
 	digitPattern     = regexp.MustCompile(`\d+`)
-	tvEpisodePattern = regexp.MustCompile(`(?i)(s\d{1,2}e\d{1,2}|\b\d{1,2}x\d{1,2}\b)`)
+	tvEpisodePattern = regexp.MustCompile(`(?i)(s\d{1,2}e\d{1,3}|\b\d{1,2}x\d{1,3}\b)`)
+	// Matches 8 hex characters enclosed in brackets or parentheses (CRC32 hashes)
+	crcPattern = regexp.MustCompile(`(?i)[\[\(][0-9a-f]{8}[\]\)]`)
 )
 
 type (
@@ -474,20 +475,16 @@ func (e *Entry) GetActiveFiles() []*File {
 // GetActiveFilesFiltered uses a two-pass universal algorithm to filter extras from season packs
 // Pass 1: Structural clustering - groups files by replacing digits with #
 // Pass 2: Rescue heuristics - TV patterns (S##E##, #x##) and anime patterns (" - " separator)
-func (e *Entry) GetActiveFilesFiltered(logger zerolog.Logger) []*File {
+func (e *Entry) GetActiveFilesFiltered() []*File {
 	files := e.GetActiveFiles()
 	if len(files) <= 3 {
-		logger.Debug().Int("files", len(files)).Msg("Skipping extras filtering (too few files)")
 		return files // Too few files, skip filtering
 	}
 
-	logger.Info().Str("entry", e.Name).Int("total_files", len(files)).Msg("Starting extras filtering")
-
-	episodes, extras := separateUniversalMedia(files, logger)
+	episodes, extras := separateUniversalMedia(files)
 
 	// Safety check: if extras > episodes, this might be an extras pack
 	if len(extras) > len(episodes) {
-		logger.Warn().Int("episodes", len(episodes)).Int("extras", len(extras)).Msg("Skipping filtering (extras > episodes, likely extras pack)")
 		return files
 	}
 
@@ -498,13 +495,11 @@ func (e *Entry) GetActiveFilesFiltered(logger zerolog.Logger) []*File {
 		}
 	}
 
-	logger.Info().Int("episodes", len(episodes)).Int("extras_filtered", len(extras)).Msg("Completed extras filtering")
-
 	return episodes
 }
 
 // separateUniversalMedia implements the two-pass universal filtering algorithm
-func separateUniversalMedia(files []*File, logger zerolog.Logger) (episodes, extras []*File) {
+func separateUniversalMedia(files []*File) (episodes, extras []*File) {
 	if len(files) == 0 {
 		return
 	}
@@ -520,12 +515,15 @@ func separateUniversalMedia(files []*File, logger zerolog.Logger) (episodes, ext
 
 	// Build templates and count occurrences
 	for _, file := range files {
-		template := digitPattern.ReplaceAllString(file.Name, "#")
+		// Step A: Neutralize the unique CRC32 hash first
+		nameWithoutHash := crcPattern.ReplaceAllString(file.Name, "[HASH]")
+
+		// Step B: Replace all remaining digits to build the structural template
+		template := digitPattern.ReplaceAllString(nameWithoutHash, "#")
+
 		templateToFile = append(templateToFile, templateFile{template, file})
 		templateCounts[template]++
 	}
-
-	logger.Debug().Int("unique_templates", len(templateCounts)).Msg("Pass 1: Created structural templates")
 
 	// Find max count
 	maxCount := 0
@@ -543,46 +541,31 @@ func separateUniversalMedia(files []*File, logger zerolog.Logger) (episodes, ext
 		}
 	}
 
-	logger.Debug().Int("max_count", maxCount).Int("max_templates", len(maxTemplates)).Msg("Pass 1: Found max templates")
-
-	// Log the winning templates for debugging
-	if logger.GetLevel() <= zerolog.DebugLevel {
-		for template := range maxTemplates {
-			logger.Debug().Str("template", template).Int("count", templateCounts[template]).Msg("Max template")
-		}
-	}
-
 	// --- PASS 2: Universal Sorting ---
 	for _, tf := range templateToFile {
 		if maxTemplates[tf.template] {
 			episodes = append(episodes, tf.file)
-			logger.Debug().Str("file", tf.file.Name).Str("reason", "max_template").Msg("Classified as episode")
 			continue
 		}
 
 		// Rescue heuristics for leftovers
 		isEpisode := false
-		reason := "extra"
 
 		// Check TV patterns: S##E##, s##e##, or #x##
 		if tvEpisodePattern.MatchString(tf.file.Name) {
 			isEpisode = true
-			reason = "tv_pattern"
 		} else if _, after, found := strings.Cut(tf.file.Name, " - "); found {
 			// Check anime pattern: " - " separator with digit after
 			rightSide := strings.TrimSpace(after)
 			if len(rightSide) > 0 && rightSide[0] >= '0' && rightSide[0] <= '9' {
 				isEpisode = true
-				reason = "anime_pattern"
 			}
 		}
 
 		if isEpisode {
 			episodes = append(episodes, tf.file)
-			logger.Debug().Str("file", tf.file.Name).Str("reason", reason).Msg("Rescued as episode")
 		} else {
 			extras = append(extras, tf.file)
-			logger.Debug().Str("file", tf.file.Name).Str("reason", reason).Msg("Filtered as extra")
 		}
 	}
 

@@ -133,10 +133,8 @@ func (d *Downloader) markAsError(entry *storage.Entry, err error) {
 
 // processSymlink creates symlinks for torrent files
 func (d *Downloader) processSymlink(entry *storage.Entry, mountPath string) error {
-	// Filter out extras if enabled
-	if d.manager.config.FilterExtras {
-		entry.FilterExtras()
-	}
+	// Filter out extra files
+	entry.FilterExtras(d.logger)
 
 	files := entry.GetActiveFiles()
 	torrentSymlinkPath := entry.DownloadPath()
@@ -231,10 +229,8 @@ func (d *Downloader) processDownload(entry *storage.Entry) error {
 
 // processTorrentDownload downloads files from debrid via HTTP
 func (d *Downloader) processTorrentDownload(entry *storage.Entry) error {
-	// Filter out extras if enabled
-	if d.manager.config.FilterExtras {
-		entry.FilterExtras()
-	}
+	// Filter out extra files
+	entry.FilterExtras(d.logger)
 
 	files := entry.GetActiveFiles()
 	d.logger.Info().Msgf("Downloading %d files...", len(files))
@@ -311,10 +307,8 @@ func (d *Downloader) processUsenetDownload(entry *storage.Entry) error {
 		return fmt.Errorf("usenet client not configured")
 	}
 
-	// Filter out extras if enabled
-	if d.manager.config.FilterExtras {
-		entry.FilterExtras()
-	}
+	// Filter out extra files
+	entry.FilterExtras(d.logger)
 
 	files := entry.GetActiveFiles()
 	d.logger.Info().Msgf("Downloading %d NZB files via usenet...", len(files))
@@ -388,10 +382,8 @@ func (d *Downloader) processUsenetDownload(entry *storage.Entry) error {
 
 // processStrm creates symlinks for torrent files
 func (d *Downloader) processStrm(torrent *storage.Entry) error {
-	// Filter out extras if enabled
-	if d.manager.config.FilterExtras {
-		torrent.FilterExtras()
-	}
+	// Filter out extra files
+	torrent.FilterExtras(d.logger)
 
 	files := torrent.GetActiveFiles()
 	d.logger.Info().Msgf("Creating .strm for %d files ...", len(files))

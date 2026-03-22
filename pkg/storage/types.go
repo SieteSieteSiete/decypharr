@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
@@ -469,7 +470,7 @@ func (e *Entry) GetActiveFiles() []*File {
 // This handles season packs that include extras (e.g., "Show.S01E01.mkv" vs "Show.S01E01.Extras.mkv").
 // The longer filename (the extra) will be marked as deleted.
 // Optimized by sorting by length and using early termination.
-func (e *Entry) FilterExtras() {
+func (e *Entry) FilterExtras(logger zerolog.Logger) {
 	if len(e.Files) < 2 {
 		return
 	}
@@ -483,6 +484,9 @@ func (e *Entry) FilterExtras() {
 	slices.SortFunc(files, func(a, b *File) int {
 		return len(a.Name) - len(b.Name)
 	})
+
+	deletedCount := 0
+	var deletedFiles []string
 
 	// For each file, check if its base name (without extension) is a substring of any longer file
 	for i, shortFile := range files {
@@ -519,8 +523,18 @@ func (e *Entry) FilterExtras() {
 
 			if containsWithDot || containsWithSpace || containsWithHyphen || containsWithUnderscore {
 				longFile.Deleted = true
+				deletedCount++
+				deletedFiles = append(deletedFiles, longFile.Name)
 			}
 		}
+	}
+
+	if deletedCount > 0 && logger.GetLevel() <= zerolog.DebugLevel {
+		logger.Debug().
+			Str("entry", e.Name).
+			Int("deleted_count", deletedCount).
+			Strs("deleted_files", deletedFiles).
+			Msg("Filtered out extra files")
 	}
 }
 

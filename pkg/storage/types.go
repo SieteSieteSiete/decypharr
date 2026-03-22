@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
@@ -462,6 +464,66 @@ func (e *Entry) GetActiveFiles() []*File {
 	}
 	return files
 }
+
+// FilterExtras marks files as deleted if their name is a substring of another file's name.
+// This handles season packs that include extras (e.g., "Show.S01E01.mkv" vs "Show.S01E01.Extras.mkv").
+// The longer filename (the extra) will be marked as deleted.
+// Optimized by sorting by length and using early termination.
+func (e *Entry) FilterExtras() {
+	if len(e.Files) < 2 {
+		return
+	}
+
+	files := e.GetActiveFiles()
+	if len(files) < 2 {
+		return
+	}
+
+	// Sort by length (shortest first) for optimal comparison
+	slices.SortFunc(files, func(a, b *File) int {
+		return len(a.Name) - len(b.Name)
+	})
+
+	// For each file, check if its base name (without extension) is a substring of any longer file
+	for i, shortFile := range files {
+		// Strip extension from the shorter filename for proper matching
+		// e.g., "Show.S01E01.mkv" -> "Show.S01E01"
+		shortBase := strings.TrimSuffix(shortFile.Name, filepath.Ext(shortFile.Name))
+
+		// Guard against edge-case files that are ONLY an extension (e.g., ".mkv")
+		// which would result in an empty shortBase and delete everything.
+		if shortBase == "" {
+			continue
+		}
+
+		// Convert to lowercase for case-insensitive matching
+		// This handles sloppy release groups with inconsistent casing
+		lowerShortBase := strings.ToLower(shortBase)
+
+		// Only check longer files (after i in sorted list)
+		for j := i + 1; j < len(files); j++ {
+			longFile := files[j]
+			if longFile.Deleted {
+				continue
+			}
+
+			// A safer check: Does the long file contain the short base PLUS a common separator?
+			// This prevents "Show.Ep.1" from matching "Show.Ep.10" (false positive)
+			// while still matching "Show.S01E01" with "Show.S01E01.Extras.mkv" (true positive)
+			lowerLongName := strings.ToLower(longFile.Name)
+
+			containsWithDot := strings.Contains(lowerLongName, lowerShortBase+".")
+			containsWithSpace := strings.Contains(lowerLongName, lowerShortBase+" ")
+			containsWithHyphen := strings.Contains(lowerLongName, lowerShortBase+"-")
+			containsWithUnderscore := strings.Contains(lowerLongName, lowerShortBase+"_")
+
+			if containsWithDot || containsWithSpace || containsWithHyphen || containsWithUnderscore {
+				longFile.Deleted = true
+			}
+		}
+	}
+}
+
 func (e *Entry) GetFolder() string {
 	// CHeck if the mount folder is empty or .
 	return GetTorrentFolder(config.Get().FolderNaming, e)

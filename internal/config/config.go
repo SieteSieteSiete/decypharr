@@ -136,6 +136,7 @@ type Config struct {
 	MaxDownloads          int                      `json:"max_downloads,omitempty"`
 	SkipPreCache          bool                     `json:"skip_pre_cache,omitempty"`
 	SkipMultiSeason       bool                     `json:"skip_multi_season,omitempty"`
+	FilterExtras          bool                     `json:"filter_extras,omitempty"`
 	AlwaysRmTrackerUrls   bool                     `json:"always_rm_tracker_urls,omitempty"`
 	Categories            []string                 `json:"categories,omitempty"`
 	FolderNaming          WebDavFolderNaming       `json:"folder_naming,omitempty"`

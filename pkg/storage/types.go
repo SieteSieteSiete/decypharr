@@ -499,12 +499,18 @@ func (e *Entry) FilterExtras(logger zerolog.Logger) {
 		// Guard against edge-case files that are ONLY an extension (e.g., ".mkv")
 		// which would result in an empty shortBase and delete everything.
 		if shortBase == "" {
+			logger.Debug().Str("file", shortFile.Name).Msg("Skipping file with empty base name")
 			continue
 		}
 
 		// Convert to lowercase for case-insensitive matching
 		// This handles sloppy release groups with inconsistent casing
 		lowerShortBase := strings.ToLower(shortBase)
+
+		logger.Debug().
+			Str("short_file", shortFile.Name).
+			Str("short_base", shortBase).
+			Msg("Checking file against longer files")
 
 		// Only check longer files (after i in sorted list)
 		for j := i + 1; j < len(files); j++ {
@@ -523,10 +529,23 @@ func (e *Entry) FilterExtras(logger zerolog.Logger) {
 			containsWithHyphen := strings.Contains(lowerLongName, lowerShortBase+"-")
 			containsWithUnderscore := strings.Contains(lowerLongName, lowerShortBase+"_")
 
+			logger.Debug().
+				Str("long_file", longFile.Name).
+				Str("short_base", shortBase).
+				Bool("match_dot", containsWithDot).
+				Bool("match_space", containsWithSpace).
+				Bool("match_hyphen", containsWithHyphen).
+				Bool("match_underscore", containsWithUnderscore).
+				Msg("File comparison result")
+
 			if containsWithDot || containsWithSpace || containsWithHyphen || containsWithUnderscore {
 				longFile.Deleted = true
 				deletedCount++
 				deletedFiles = append(deletedFiles, longFile.Name)
+				logger.Debug().
+					Str("deleted_file", longFile.Name).
+					Str("matched_base", shortBase).
+					Msg("Marked file as deleted (extra)")
 			}
 		}
 	}

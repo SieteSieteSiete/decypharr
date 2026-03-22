@@ -480,6 +480,8 @@ func (e *Entry) FilterExtras(logger zerolog.Logger) {
 		return
 	}
 
+	logger.Debug().Str("entry", e.Name).Int("file_count", len(files)).Msg("Running extras filter")
+
 	// Sort by length (shortest first) for optimal comparison
 	slices.SortFunc(files, func(a, b *File) int {
 		return len(a.Name) - len(b.Name)

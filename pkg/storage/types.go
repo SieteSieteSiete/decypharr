@@ -4,15 +4,19 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
-	"slices"
+	"regexp"
 	"strings"
 	"time"
 
-	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
+)
+
+var (
+	digitPattern     = regexp.MustCompile(`\d+`)
+	tvEpisodePattern = regexp.MustCompile(`(?i)(s\d{1,2}e\d{1,2}|\b\d{1,2}x\d{1,2}\b)`)
 )
 
 type (
@@ -466,99 +470,100 @@ func (e *Entry) GetActiveFiles() []*File {
 	return files
 }
 
-// FilterExtras marks files as deleted if their name is a substring of another file's name.
-// This handles season packs that include extras (e.g., "Show.S01E01.mkv" vs "Show.S01E01.Extras.mkv").
-// The longer filename (the extra) will be marked as deleted.
-// Optimized by sorting by length and using early termination.
-func (e *Entry) FilterExtras(logger zerolog.Logger) {
-	if len(e.Files) < 2 {
-		return
-	}
-
+// GetActiveFilesFiltered uses a two-pass universal algorithm to filter extras from season packs
+// Pass 1: Structural clustering - groups files by replacing digits with #
+// Pass 2: Rescue heuristics - TV patterns (S##E##, #x##) and anime patterns (" - " separator)
+func (e *Entry) GetActiveFilesFiltered() []*File {
 	files := e.GetActiveFiles()
-	if len(files) < 2 {
+	if len(files) <= 3 {
+		return files // Too few files, skip filtering
+	}
+
+	episodes, extras := separateUniversalMedia(files)
+
+	// Safety check: if extras > episodes, this might be an extras pack
+	if len(extras) > len(episodes) {
+		return files
+	}
+
+	// Mark extras as deleted so they persist
+	for _, extra := range extras {
+		if f, exists := e.Files[extra.Name]; exists {
+			f.Deleted = true
+		}
+	}
+
+	return episodes
+}
+
+// separateUniversalMedia implements the two-pass universal filtering algorithm
+func separateUniversalMedia(files []*File) (episodes, extras []*File) {
+	if len(files) == 0 {
 		return
 	}
 
-	logger.Debug().Str("entry", e.Name).Int("file_count", len(files)).Msg("Running extras filter")
+	// --- PASS 1: Structural Clustering ---
+	type templateFile struct {
+		template string
+		file     *File
+	}
 
-	// Sort by length (shortest first) for optimal comparison
-	slices.SortFunc(files, func(a, b *File) int {
-		return len(a.Name) - len(b.Name)
-	})
+	templateToFile := make([]templateFile, 0, len(files))
+	templateCounts := make(map[string]int)
 
-	deletedCount := 0
-	var deletedFiles []string
+	// Build templates and count occurrences
+	for _, file := range files {
+		template := digitPattern.ReplaceAllString(file.Name, "#")
+		templateToFile = append(templateToFile, templateFile{template, file})
+		templateCounts[template]++
+	}
 
-	// For each file, check if its base name (without extension) is a substring of any longer file
-	for i, shortFile := range files {
-		// Strip extension from the shorter filename for proper matching
-		// e.g., "Show.S01E01.mkv" -> "Show.S01E01"
-		shortBase := strings.TrimSuffix(shortFile.Name, filepath.Ext(shortFile.Name))
+	// Find max count
+	maxCount := 0
+	for _, count := range templateCounts {
+		if count > maxCount {
+			maxCount = count
+		}
+	}
 
-		// Guard against edge-case files that are ONLY an extension (e.g., ".mkv")
-		// which would result in an empty shortBase and delete everything.
-		if shortBase == "" {
-			logger.Debug().Str("file", shortFile.Name).Msg("Skipping file with empty base name")
+	// Collect all templates with max count
+	maxTemplates := make(map[string]bool)
+	for template, count := range templateCounts {
+		if count == maxCount {
+			maxTemplates[template] = true
+		}
+	}
+
+	// --- PASS 2: Universal Sorting ---
+	for _, tf := range templateToFile {
+		if maxTemplates[tf.template] {
+			episodes = append(episodes, tf.file)
 			continue
 		}
 
-		// Convert to lowercase for case-insensitive matching
-		// This handles sloppy release groups with inconsistent casing
-		lowerShortBase := strings.ToLower(shortBase)
+		// Rescue heuristics for leftovers
+		isEpisode := false
 
-		logger.Debug().
-			Str("short_file", shortFile.Name).
-			Str("short_base", shortBase).
-			Msg("Checking file against longer files")
-
-		// Only check longer files (after i in sorted list)
-		for j := i + 1; j < len(files); j++ {
-			longFile := files[j]
-			if longFile.Deleted {
-				continue
+		// Check TV patterns: S##E##, s##e##, or #x##
+		if tvEpisodePattern.MatchString(tf.file.Name) {
+			isEpisode = true
+		} else if _, after, found := strings.Cut(tf.file.Name, " - "); found {
+			// Check anime pattern: " - " separator with digit after
+			rightSide := strings.TrimSpace(after)
+			if len(rightSide) > 0 && rightSide[0] >= '0' && rightSide[0] <= '9' {
+				isEpisode = true
 			}
+		}
 
-			// A safer check: Does the long file contain the short base PLUS a common separator?
-			// This prevents "Show.Ep.1" from matching "Show.Ep.10" (false positive)
-			// while still matching "Show.S01E01" with "Show.S01E01.Extras.mkv" (true positive)
-			lowerLongName := strings.ToLower(longFile.Name)
-
-			containsWithDot := strings.Contains(lowerLongName, lowerShortBase+".")
-			containsWithSpace := strings.Contains(lowerLongName, lowerShortBase+" ")
-			containsWithHyphen := strings.Contains(lowerLongName, lowerShortBase+"-")
-			containsWithUnderscore := strings.Contains(lowerLongName, lowerShortBase+"_")
-
-			logger.Debug().
-				Str("long_file", longFile.Name).
-				Str("short_base", shortBase).
-				Bool("match_dot", containsWithDot).
-				Bool("match_space", containsWithSpace).
-				Bool("match_hyphen", containsWithHyphen).
-				Bool("match_underscore", containsWithUnderscore).
-				Msg("File comparison result")
-
-			if containsWithDot || containsWithSpace || containsWithHyphen || containsWithUnderscore {
-				longFile.Deleted = true
-				deletedCount++
-				deletedFiles = append(deletedFiles, longFile.Name)
-				logger.Debug().
-					Str("deleted_file", longFile.Name).
-					Str("matched_base", shortBase).
-					Msg("Marked file as deleted (extra)")
-			}
+		if isEpisode {
+			episodes = append(episodes, tf.file)
+		} else {
+			extras = append(extras, tf.file)
 		}
 	}
 
-	if deletedCount > 0 && logger.GetLevel() <= zerolog.DebugLevel {
-		logger.Debug().
-			Str("entry", e.Name).
-			Int("deleted_count", deletedCount).
-			Strs("deleted_files", deletedFiles).
-			Msg("Filtered out extra files")
-	}
+	return
 }
-
 func (e *Entry) GetFolder() string {
 	// CHeck if the mount folder is empty or .
 	return GetTorrentFolder(config.Get().FolderNaming, e)

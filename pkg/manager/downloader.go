@@ -133,7 +133,7 @@ func (d *Downloader) markAsError(entry *storage.Entry, err error) {
 
 // processSymlink creates symlinks for torrent files
 func (d *Downloader) processSymlink(entry *storage.Entry, mountPath string) error {
-	files := entry.GetActiveFiles()
+	files := entry.GetActiveFilesFiltered()
 	torrentSymlinkPath := entry.DownloadPath()
 	d.logger.Info().Str("mount_path", mountPath).Msgf("Creating symlinks for %d files in %s", len(files), torrentSymlinkPath)
 
@@ -226,7 +226,7 @@ func (d *Downloader) processDownload(entry *storage.Entry) error {
 
 // processTorrentDownload downloads files from debrid via HTTP
 func (d *Downloader) processTorrentDownload(entry *storage.Entry) error {
-	files := entry.GetActiveFiles()
+	files := entry.GetActiveFilesFiltered()
 	d.logger.Info().Msgf("Downloading %d files...", len(files))
 
 	totalSize := int64(0)
@@ -301,7 +301,7 @@ func (d *Downloader) processUsenetDownload(entry *storage.Entry) error {
 		return fmt.Errorf("usenet client not configured")
 	}
 
-	files := entry.GetActiveFiles()
+	files := entry.GetActiveFilesFiltered()
 	d.logger.Info().Msgf("Downloading %d NZB files via usenet...", len(files))
 
 	downloadedFolder := entry.DownloadPath()
@@ -408,7 +408,7 @@ func (d *Downloader) processStrm(torrent *storage.Entry) error {
 
 func (d *Downloader) detectMultiSeason(torrent *storage.Entry) (bool, []SeasonInfo) {
 	torrentName := torrent.Name
-	files := torrent.GetActiveFiles()
+	files := torrent.GetActiveFilesFiltered()
 
 	// Find all seasons present in the files
 	seasonsFound := findAllSeasons(files)

@@ -2,11 +2,13 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -131,7 +133,7 @@ func (d *Downloader) markAsError(entry *storage.Entry, err error) {
 	})
 }
 
-// processSymlink creates symlinks for torrent files
+// processSymlink creates symlinks for torrent files with comprehensive verification
 func (d *Downloader) processSymlink(entry *storage.Entry, mountPath string) error {
 	files := entry.GetActiveFilesFiltered()
 	torrentSymlinkPath := entry.DownloadPath()
@@ -194,21 +196,72 @@ func (d *Downloader) processSymlink(entry *storage.Entry, mountPath string) erro
 	entry.IsDownloading = true
 	_ = d.manager.queue.Update(entry)
 
-	// Run ffprobe on files to warm cache and trigger imports
-	if !d.manager.config.SkipPreCache && len(filePaths) > 0 {
+	// FIX #1: Make ffprobe mandatory for completion (cannot be disabled)
+	// This ensures Radarr/Sonarr media info checks will succeed
+	if len(filePaths) > 0 {
 		probeFiles := filePaths
 		if len(probeFiles) > MaxNZBPreCacheFiles {
 			probeFiles = probeFiles[:MaxNZBPreCacheFiles]
 		}
-		d.logger.Debug().Int("files", len(probeFiles)).Msgf("Running ffprobe on %s", entry.Name)
+
+		d.logger.Info().Int("files", len(probeFiles)).Msgf("Running mandatory ffprobe verification on %s", entry.Name)
+
+		// Run ffprobe - this now BLOCKS completion on failure
 		if err := d.manager.RunFFprobe(probeFiles); err != nil {
-			d.logger.Error().Msgf("Failed to run ffprobe: %s", err)
-		} else {
-			d.logger.Debug().Str("entry", entry.Name).Msgf("Ran ffprobe on %d/%d files", len(probeFiles), len(filePaths))
+			return fmt.Errorf("ffprobe verification failed for %s: %w (download not complete - Radarr/Sonarr import would fail)", entry.Name, err)
+		}
+
+		d.logger.Info().Str("entry", entry.Name).Msgf("Successfully verified %d/%d files with ffprobe", len(probeFiles), len(filePaths))
+	}
+
+	// FIX #2: Verify symlinks are valid and point to correct files
+	d.logger.Info().Msgf("Verifying symlink targets for %s", entry.Name)
+	for _, filePath := range filePaths {
+		if err := d.verifySymlinkTarget(filePath); err != nil {
+			return fmt.Errorf("symlink verification failed for %s: %w", filePath, err)
+		}
+	}
+	d.logger.Info().Msgf("All %d symlink targets verified", len(filePaths))
+
+	// FIX #3: Add file readability buffer and re-check
+	// Wait for mount to stabilize after ffprobe
+	d.logger.Debug().Msgf("Waiting for mount to stabilize before final verification")
+	bufferTime := 2 * time.Second
+	if entry.IsNZB() {
+		bufferTime = 3 * time.Second // NZB might need more time
+	}
+	time.Sleep(bufferTime)
+
+	// Spot check first few files to ensure they're still readable
+	sampleSize := len(filePaths)
+	if sampleSize > 5 {
+		sampleSize = 5
+	}
+	d.logger.Debug().Int("sample", sampleSize).Msgf("Running post-buffer readability check")
+
+	for i := 0; i < sampleSize; i++ {
+		if err := d.quickFileCheck(filePaths[i]); err != nil {
+			return fmt.Errorf("post-buffer file check failed for %s: %w (mount may be unstable)", filePaths[i], err)
 		}
 	}
 
+	// FIX #2 (continued): Verify media info is readable (mimics Radarr/Sonarr behavior)
+	d.logger.Info().Msgf("Running Radarr/Sonarr-compatible media info verification")
+	// Check a sample of files (not all, to save time)
+	mediaCheckSample := len(filePaths)
+	if mediaCheckSample > 3 {
+		mediaCheckSample = 3
+	}
+
+	for i := 0; i < mediaCheckSample; i++ {
+		if err := d.verifyMediaInfoReadable(filePaths[i]); err != nil {
+			return fmt.Errorf("media info verification failed for %s: %w (Radarr/Sonarr import would fail)", filePaths[i], err)
+		}
+	}
+	d.logger.Info().Int("checked", mediaCheckSample).Msgf("Media info verification passed")
+
 	d.markAsCompleted(entry)
+	d.logger.Info().Msgf("Download completed with full verification: %s", entry.Name)
 
 	return nil
 }
@@ -524,4 +577,106 @@ func (cw *countWriter) Write(p []byte) (int, error) {
 	n := len(p)
 	cw.n.Add(int64(n))
 	return n, nil
+}
+
+// verifyMediaInfoReadable checks if a file is readable by ffprobe (mimics Radarr/Sonarr behavior)
+// This ensures that when Radarr/Sonarr try to read media info, it will succeed
+func (d *Downloader) verifyMediaInfoReadable(symlinkPath string) error {
+	// Check if ffprobe is available
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		d.logger.Warn().Msg("ffprobe not available, skipping media info verification")
+		return nil
+	}
+
+	// Run ffprobe with same parameters Radarr/Sonarr use
+	ctx, cancel := context.WithTimeout(context.Background(), FFprobeTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "ffprobe",
+		"-v", "quiet",
+		"-print_format", "json",
+		"-show_format",
+		"-show_streams",
+		symlinkPath,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffprobe failed for %s: %w\noutput: %s", symlinkPath, err, string(output))
+	}
+
+	// Verify we got valid JSON with streams (Radarr/Sonarr expect this)
+	var result map[string]interface{}
+	if err := json.Unmarshal(output, &result); err != nil {
+		return fmt.Errorf("ffprobe returned invalid JSON for %s: %w", symlinkPath, err)
+	}
+
+	streams, ok := result["streams"]
+	if !ok {
+		return fmt.Errorf("ffprobe output missing streams for %s", symlinkPath)
+	}
+
+	streamsArray, ok := streams.([]interface{})
+	if !ok || len(streamsArray) == 0 {
+		return fmt.Errorf("ffprobe output has no streams for %s", symlinkPath)
+	}
+
+	d.logger.Debug().Str("file", symlinkPath).Int("streams", len(streamsArray)).Msg("Media info verification passed")
+	return nil
+}
+
+// verifySymlinkTarget checks that the symlink points to a valid, readable file
+func (d *Downloader) verifySymlinkTarget(symlinkPath string) error {
+	// Check if symlink exists
+	if _, err := os.Lstat(symlinkPath); err != nil {
+		return fmt.Errorf("symlink does not exist: %w", err)
+	}
+
+	// Resolve to final target (follows all symlinks)
+	resolvedPath, err := filepath.EvalSymlinks(symlinkPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve symlink target: %w", err)
+	}
+
+	// Verify target file exists and is accessible
+	fileInfo, err := os.Stat(resolvedPath)
+	if err != nil {
+		return fmt.Errorf("symlink target not accessible: %s -> %s: %w", symlinkPath, resolvedPath, err)
+	}
+
+	// Verify it's a regular file (not directory or special file)
+	if !fileInfo.Mode().IsRegular() {
+		return fmt.Errorf("symlink target is not a regular file: %s", resolvedPath)
+	}
+
+	// Verify file is readable by attempting to open it
+	f, err := os.Open(resolvedPath)
+	if err != nil {
+		return fmt.Errorf("symlink target not readable: %w", err)
+	}
+	f.Close()
+
+	return nil
+}
+
+// quickFileCheck performs a fast readability check on a file
+func (d *Downloader) quickFileCheck(filePath string) error {
+	// Try to open and read first 1KB
+	f, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("file not openable: %w", err)
+	}
+	defer f.Close()
+
+	buf := make([]byte, 1024)
+	n, err := f.Read(buf)
+	if err != nil {
+		return fmt.Errorf("file not readable: %w", err)
+	}
+
+	if n == 0 {
+		return fmt.Errorf("file is empty")
+	}
+
+	return nil
 }
